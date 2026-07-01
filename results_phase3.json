@@ -1,0 +1,154 @@
+{
+  "experiment": "GIC2026_Phase3_DOE_EnergyInfrastructure",
+  "team": "Qudit Creons",
+  "member": "Abhishek Raj",
+  "test_system": "IEEE 118-bus (MATPOWER case118)",
+  "ai_loads_mw": {
+    "bus_49": 300,
+    "bus_80": 300
+  },
+  "n_candidates": 20,
+  "candidate_buses": [
+    15,
+    27,
+    31,
+    34,
+    40,
+    42,
+    45,
+    49,
+    54,
+    55,
+    59,
+    62,
+    70,
+    74,
+    77,
+    80,
+    90,
+    92,
+    100,
+    116
+  ],
+  "n_qubits": 40,
+  "n_scenarios": 15,
+  "capital_budget_mw": 500,
+  "baseline_eue": 62.6671,
+  "milp": {
+    "status": "Optimal",
+    "allocation": {
+      "42": 50,
+      "49": 100,
+      "54": 50,
+      "59": 100,
+      "80": 100,
+      "90": 50,
+      "116": 50
+    },
+    "total_mw": 500,
+    "eue": 4.9398,
+    "eue_reduction_pct": 92.117395,
+    "runtime_sec": 0.007388,
+    "near_optimal_count": 1
+  },
+  "dwave_sa": {
+    "allocation": {
+      "62": 50,
+      "70": 50,
+      "77": 50,
+      "80": 100,
+      "90": 100,
+      "92": 50,
+      "116": 100
+    },
+    "total_mw": 500,
+    "eue": 5.37004,
+    "eue_reduction_pct": 91.430846,
+    "optimality_gap_pct": 8.709664,
+    "near_optimal_count": 1,
+    "runtime_sec": 0.442582,
+    "num_reads": 3000,
+    "num_sweeps": 5000
+  },
+  "leap_hybrid": null,
+  "scaling_study": [
+    {
+      "n": 10,
+      "qubits": 20,
+      "milp_eue": 6.298519999999995,
+      "milp_rt": 0.006661653518676758,
+      "sa_eue": 9.503799999999995,
+      "sa_rt": 0.0343317985534668,
+      "sa_gap": 92.3924045507916,
+      "sa_near_opt": 1
+    },
+    {
+      "n": 15,
+      "qubits": 30,
+      "milp_eue": 4.9397999999999955,
+      "milp_rt": 0.006621599197387695,
+      "sa_eue": 5.999799999999994,
+      "sa_rt": 0.05119800567626953,
+      "sa_gap": 21.45835863800153,
+      "sa_near_opt": 1
+    },
+    {
+      "n": 20,
+      "qubits": 40,
+      "milp_eue": 4.9397999999999955,
+      "milp_rt": 0.0070209503173828125,
+      "sa_eue": 6.629559999999996,
+      "sa_rt": 0.06290698051452637,
+      "sa_gap": 34.20705291712219,
+      "sa_near_opt": 1
+    },
+    {
+      "n": 25,
+      "qubits": 50,
+      "milp_eue": 4.9397999999999955,
+      "milp_rt": 0.01047372817993164,
+      "sa_eue": 7.882679999999997,
+      "sa_rt": 0.07893705368041992,
+      "sa_gap": 59.57488157415288,
+      "sa_near_opt": 1
+    }
+  ],
+  "penalty_sensitivity": [
+    {
+      "lambda": 2.0,
+      "eue": 6.2363,
+      "cap": 500,
+      "feasible": true
+    },
+    {
+      "lambda": 4.0,
+      "eue": 6.64,
+      "cap": 500,
+      "feasible": true
+    },
+    {
+      "lambda": 6.0,
+      "eue": 6.7611,
+      "cap": 500,
+      "feasible": true
+    },
+    {
+      "lambda": 8.0,
+      "eue": 6.0425,
+      "cap": 500,
+      "feasible": true
+    },
+    {
+      "lambda": 10.0,
+      "eue": 6.9219,
+      "cap": 500,
+      "feasible": true
+    },
+    {
+      "lambda": 15.0,
+      "eue": 6.4462,
+      "cap": 500,
+      "feasible": true
+    }
+  ]
+}

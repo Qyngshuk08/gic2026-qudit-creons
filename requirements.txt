@@ -1,0 +1,4 @@
+dwave-ocean-sdk>=7.0
+pulp>=2.7
+highspy>=1.5
+numpy>=1.24
