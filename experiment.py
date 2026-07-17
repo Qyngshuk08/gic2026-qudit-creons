@@ -345,7 +345,7 @@ if args.ibm:
 
         cost_hamiltonian = SparsePauliOp.from_list(pauli_list) if pauli_list else SparsePauliOp("I"*n, [0])
 
-        service = QiskitRuntimeService(channel="ibm_quantum", token=token)
+        service = QiskitRuntimeService(channel="ibm_quantum_platform", token=token)
         backend = service.least_busy(operational=True, simulator=False, min_num_qubits=n)
         print(f"  Backend selected: {backend.name} ({backend.num_qubits} qubits)")
 
