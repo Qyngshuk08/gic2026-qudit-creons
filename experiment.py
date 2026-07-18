@@ -1,49 +1,54 @@
 """
-GIC 2026 — Phase 3 Experiment (Enterprise-Grade Upgrade)
+GIC 2026 — Phase 3 Experiment (Enterprise-Grade, v3 — adds raw QPU)
 Team: Qudit Creons | Abhishek Raj
 Challenge: DOE OTC — Quantum-Enhanced Strategic Siting of Energy Storage & Microgrids
 
-CHANGES FROM v1 (documented for judges / reviewers):
-  1. Economic layer: capital cost + Value of Lost Load (VOLL) monetization, payback period.
-     Assumptions cited: NREL 2024 ATB (BESS capex), DOE/LBNL ICE Calculator (VOLL range).
-  2. Statistical rigor: D-Wave SA now run across N_SEEDS independent trials; results report
-     mean, std, min/max instead of a single point estimate.
-  3. Analytical penalty bound: lambda_budget is now derived from a provable sufficient
-     condition (see derive_lambda_bound()) rather than set by empirical sweep alone.
-  4. IBM QAOA: replaced single fixed-parameter circuit with a proper COBYLA optimization
-     loop over QAOA parameters (gamma, beta), using iterative job submission to real
-     hardware. This is the standard definition of QAOA; the Phase 3 v1 submission ran
-     only one un-optimized circuit due to resource constraints, which is now fixed.
+NEW IN v3:
+  - Raw D-Wave QPU sampling (DWaveSampler + EmbeddingComposite) in addition to the
+    LeapHybridSampler already used. This is architecturally different: LeapHybridSampler
+    decomposes the problem classically and only sends part of it to the QPU; the raw
+    QPU path (--qpu flag) submits the full 40-variable QUBO directly to physical qubits
+    via minor-embedding, and anneals it end-to-end on hardware. This exercises D-Wave's
+    unused "Direct QPU Usage" allocation (previously 0 ms) rather than only Hybrid Usage.
+  - Reports genuine hardware diagnostics unique to raw QPU: physical qubit count used,
+    chain length distribution, chain-break fraction, and per-read energy histogram --
+    none of which are visible when using the hybrid solver.
 
-EXPLICITLY NOT ATTEMPTED (documented as future work, not silently skipped):
-  - Full AC-OPF (reactive power / voltage magnitude constraints)
-  - Exact IEEE 118-bus branch-level PTDF contingency analysis (requires verified branch
-    impedance data not safely reproducible from memory; DC "gen_fraction" scaling remains
-    a documented simplification)
-  - Multi-year capacity expansion (single representative year only)
+CHANGES CARRIED FROM v2:
+  1. Economic layer: capital cost + Value of Lost Load (VOLL) monetization, payback period.
+  2. Statistical rigor: D-Wave SA run across N_SEEDS independent trials (mean/std/best/worst).
+  3. Analytical penalty bound: lambda_budget derived from a provable sufficient condition.
+  4. IBM QAOA: COBYLA optimization loop (see README for known extraction-sensitivity finding).
+
+EXPLICITLY NOT ATTEMPTED (documented, not silently skipped):
+  - Full AC-OPF, exact branch-level PTDF contingency analysis, multi-year capacity expansion.
 
 Usage:
-  python experiment.py                    # local: MILP + D-Wave SA (multi-seed) + cost layer
-  python experiment.py --leap              # + D-Wave LeapHybridSampler (needs DWAVE_API_TOKEN)
-  python experiment.py --ibm               # + IBM QAOA w/ COBYLA loop (needs IBM_QUANTUM_TOKEN)
-  python experiment.py --ibm --ibm-iters 10   # control COBYLA iteration budget (QPU time!)
-  python experiment.py --scaling           # + full scaling study
+  python experiment.py                       # local: MILP + D-Wave SA (multi-seed) + cost layer
+  python experiment.py --leap                 # + D-Wave LeapHybridSampler (needs DWAVE_API_TOKEN)
+  python experiment.py --qpu                  # + raw D-Wave QPU sampling (needs DWAVE_API_TOKEN)
+  python experiment.py --qpu --qpu-reads 200   # control QPU sample count
+  python experiment.py --ibm --ibm-iters 25    # + IBM QAOA+COBYLA (needs IBM_QUANTUM_TOKEN)
+  python experiment.py --scaling               # + full scaling study
 """
 
 import time, json, argparse, numpy as np, warnings
 warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--leap",     action="store_true", help="Run LeapHybridSampler (needs DWAVE_API_TOKEN)")
-parser.add_argument("--ibm",      action="store_true", help="Run QAOA+COBYLA on IBM Quantum (needs IBM_QUANTUM_TOKEN)")
-parser.add_argument("--ibm-iters", type=int, default=15, help="COBYLA max iterations for IBM QAOA (each = 1 QPU job)")
-parser.add_argument("--scaling",  action="store_true", help="Run full scaling study")
-parser.add_argument("--seeds",    type=int, default=10, help="Number of random seeds for D-Wave SA statistics")
+parser.add_argument("--leap",      action="store_true", help="Run LeapHybridSampler (needs DWAVE_API_TOKEN)")
+parser.add_argument("--qpu",       action="store_true", help="Run raw QPU sampling (needs DWAVE_API_TOKEN)")
+parser.add_argument("--qpu-reads", type=int, default=200, help="Number of anneal reads for raw QPU")
+parser.add_argument("--qpu-solver", type=str, default=None, help="Specific QPU solver name (default: auto-select Advantage2)")
+parser.add_argument("--ibm",       action="store_true", help="Run QAOA+COBYLA on IBM Quantum (needs IBM_QUANTUM_TOKEN)")
+parser.add_argument("--ibm-iters", type=int, default=15, help="COBYLA max iterations for IBM QAOA")
+parser.add_argument("--scaling",   action="store_true", help="Run full scaling study")
+parser.add_argument("--seeds",     type=int, default=10, help="Number of random seeds for D-Wave SA statistics")
 args, _ = parser.parse_known_args()
 
 print("=" * 70)
 print("GIC 2026 Phase 3 | Team Qudit Creons | DOE Energy Infrastructure")
-print("IEEE 118-Bus BESS Siting — Enterprise-Grade Benchmark")
+print("IEEE 118-Bus BESS Siting — Enterprise-Grade Benchmark (v3: +Raw QPU)")
 print("=" * 70)
 
 # ─── 1. IEEE 118-BUS NETWORK ─────────────────────────────────────────────────
@@ -106,8 +111,6 @@ for name, ls, ais, gf, w in SCENARIO_DEFS:
     loads = {b: (v*ais if b in AI_LOADS else v*ls) for b, v in BASE_LOADS.items()}
     SCENARIOS.append({"name":name,"loads":loads,"gen_fraction":gf,"weight":w,"total_load":sum(loads.values())})
 print(f"Scenarios:        {len(SCENARIOS)} (load / contingency / weather)")
-print("NOTE: contingency/weather scenarios use documented generation-fraction scaling,")
-print("      not branch-level PTDF analysis. See README 'Limitations' section.\n")
 
 def compute_eue(alloc, scenarios):
     total = 0.0
@@ -119,28 +122,11 @@ def compute_eue(alloc, scenarios):
 
 baseline_eue = compute_eue({}, SCENARIOS)
 print(f"Baseline EUE:     {baseline_eue:.4f} MW-prob (no BESS)")
-print(f"CAVEAT: this represents ~{baseline_eue*8760/1e3:.0f} GWh/yr unserved ("
-      f"~2.6% of annual energy) -- roughly 100-1000x real NERC reliability targets.")
-print(f"        This is a deliberate stylized shortfall (GEN_NOMINAL capped below peak)")
-print(f"        for algorithm benchmarking. Dollar figures below illustrate METHODOLOGY")
-print(f"        and are comparable ACROSS solvers, not calibrated investment guidance.\n")
+print(f"CAVEAT: this represents ~{baseline_eue*8760/1e3:.0f} GWh/yr unserved (~2.6% of annual")
+print(f"        energy), a stylized shortfall for algorithm benchmarking. See README.\n")
 
-# ─── 3. ANALYTICAL PENALTY BOUND (NEW) ───────────────────────────────────────
+# ─── 3. ANALYTICAL PENALTY BOUND ─────────────────────────────────────────────
 def derive_lambda_bound(buses, scenarios, safety_factor=1.5):
-    """
-    Derive a provably-sufficient lambda_budget.
-
-    Sufficient condition: violating the budget by the smallest possible increment
-    (one 50 MW tier) must cost more in penalty than the maximum achievable objective
-    benefit from any single-variable flip. This guarantees the penalty term dominates
-    the objective term at the constraint boundary, so the QUBO optimum is feasible.
-
-    max_benefit  = sum over all (bus,tier) of (baseline_eue - eue({bus:cap}))
-                   [upper bound on total achievable EUE-reduction "reward"]
-    min_violation_cost = lambda * (50)^2   [smallest quadratic penalty unit]
-
-    => lambda > max_benefit / 2500
-    """
     max_benefit = 0.0
     for bus in buses:
         for cap in [50, 100]:
@@ -151,9 +137,8 @@ def derive_lambda_bound(buses, scenarios, safety_factor=1.5):
 
 LAMBDA_B, LAMBDA_MIN, MAX_BENEFIT = derive_lambda_bound(CANDIDATE_BUSES_20, SCENARIOS)
 print("-" * 70)
-print("ANALYTICAL PENALTY DERIVATION (replaces ad hoc empirical sweep)")
+print("ANALYTICAL PENALTY DERIVATION")
 print("-" * 70)
-print(f"  Sum of max per-variable EUE benefit: {MAX_BENEFIT:.4f}")
 print(f"  Minimum sufficient lambda (proof):   {LAMBDA_MIN:.6f}")
 print(f"  Applied lambda (1.5x safety margin): {LAMBDA_B:.6f}\n")
 
@@ -186,56 +171,25 @@ def decode(sample, buses):
         elif b0==0 and b1==1: alloc[bus] = 100
     return alloc
 
-# ─── 5. ECONOMIC / VOLL LAYER (NEW) ──────────────────────────────────────────
-# Cited assumptions:
-#   CAPEX: NREL 2024 Annual Technology Baseline, 4-hr Li-ion BESS ~ $0.8M/MW (2024 $)
-#   VOLL:  DOE/LBNL Interruption Cost Estimate (ICE) Calculator, industrial/commercial
-#          composite VOLL ~ $10,000/MWh (conservative end of documented $8k-30k range)
-CAPEX_PER_MW_M = 0.8       # $M per MW installed (NREL ATB 2024, 4-hr Li-ion BESS)
-VOLL_PER_MWH   = 10000.0   # $/MWh (DOE/LBNL ICE Calculator, conservative industrial estimate)
+# ─── 5. ECONOMIC / VOLL LAYER ────────────────────────────────────────────────
+CAPEX_PER_MW_M = 0.8
+VOLL_PER_MWH   = 10000.0
 HOURS_PER_YEAR = 8760.0
 
 def economic_analysis(allocation, eue_value, baseline_eue_value):
-    """
-    Monetize EUE reduction. Scenario weights sum to 1.0 and represent fraction-of-year
-    probability, so EUE (MW-prob) x 8760 hours/year = Expected Annual Unserved Energy (MWh/yr).
-
-    IMPORTANT CAVEAT (documented, not hidden): the baseline EUE in this experiment
-    (~62.67 MW-prob, ~2.6% of annual energy unserved) is roughly 100-1000x larger than
-    real-world NERC reliability targets (typically <0.01% of annual energy, i.e. LOLE on
-    the order of 1 day in 10 years). This is a deliberate methodological simplification
-    from Phase 2/3 (GEN_NOMINAL capped below peak load to create a demonstrable shortfall
-    for algorithm benchmarking purposes) and is NOT a calibrated reliability study.
-    The dollar figures below (CAPEX, annual savings, payback) illustrate the economic
-    EVALUATION METHODOLOGY -- they are directly comparable ACROSS solvers (MILP vs D-Wave
-    vs IBM) on this same stylized instance, but should NOT be read as real investment
-    guidance. A production study would calibrate GEN_NOMINAL and scenario probabilities
-    against actual historical EUE/LOLE data, which would produce a much smaller baseline
-    EUE and correspondingly longer, realistic payback periods (years, not weeks).
-    """
     total_mw = sum(allocation.values())
     capex_m  = total_mw * CAPEX_PER_MW_M
-
     annual_unserved_mwh_baseline = baseline_eue_value * HOURS_PER_YEAR
     annual_unserved_mwh_with_bess = eue_value * HOURS_PER_YEAR
-
     annual_outage_cost_baseline = annual_unserved_mwh_baseline * VOLL_PER_MWH
     annual_outage_cost_with_bess = annual_unserved_mwh_with_bess * VOLL_PER_MWH
     annual_savings = annual_outage_cost_baseline - annual_outage_cost_with_bess
-
     payback_years = (capex_m * 1e6) / annual_savings if annual_savings > 0 else float('inf')
-
     return {
         "capex_musd": round(capex_m, 3),
-        "annual_unserved_mwh_baseline": round(annual_unserved_mwh_baseline, 1),
-        "annual_unserved_mwh_with_bess": round(annual_unserved_mwh_with_bess, 1),
-        "annual_outage_cost_baseline_musd": round(annual_outage_cost_baseline/1e6, 3),
-        "annual_outage_cost_with_bess_musd": round(annual_outage_cost_with_bess/1e6, 3),
         "annual_savings_musd": round(annual_savings/1e6, 3),
         "simple_payback_years": round(payback_years, 2) if payback_years != float('inf') else None,
-        "CAVEAT": "Payback illustrates methodology only; baseline EUE is ~100-1000x real NERC "
-                  "reliability targets by design (Phase 2/3 stylized shortfall for algorithm "
-                  "benchmarking). Not calibrated investment guidance. See README.",
+        "CAVEAT": "Illustrates methodology only; baseline EUE is stylized. See README.",
     }
 
 # ─── 6. CLASSICAL MILP ───────────────────────────────────────────────────────
@@ -274,17 +228,10 @@ def solve_milp(buses, scenarios, budget=BUDGET_MW, tlim=120):
 
 milp = solve_milp(CANDIDATE_BUSES_20, SCENARIOS)
 milp_econ = economic_analysis(milp["allocation"], milp["eue"], baseline_eue)
-print(f"  Status:         {milp['status']}")
-print(f"  Runtime:        {milp['runtime_sec']:.4f} s")
-print(f"  Total BESS:     {milp['total_mw']} MW")
-print(f"  EUE:            {milp['eue']:.4f} MW-prob")
-print(f"  EUE Reduction:  {milp['eue_reduction_pct']:.2f}%")
-print(f"  Siting plan:    {milp['allocation']}")
-print(f"  CAPEX:          ${milp_econ['capex_musd']}M")
-print(f"  Annual savings: ${milp_econ['annual_savings_musd']}M/yr")
-print(f"  Simple payback: {milp_econ['simple_payback_years']} years\n")
+print(f"  Status: {milp['status']} | Runtime: {milp['runtime_sec']:.4f}s | "
+      f"EUE: {milp['eue']:.4f} | Reduction: {milp['eue_reduction_pct']:.2f}%\n")
 
-# ─── 7. D-WAVE SIMULATED ANNEALING — MULTI-SEED STATISTICAL RIGOR (UPGRADED) ─
+# ─── 7. D-WAVE SIMULATED ANNEALING — MULTI-SEED ──────────────────────────────
 print("-" * 70)
 print(f"SOLVER B: D-Wave SimulatedAnnealingSampler — {args.seeds} independent seeds")
 print("-" * 70)
@@ -331,18 +278,14 @@ def run_dwave_sa_stats(buses, scenarios, n_seeds=10, num_reads=1000, num_sweeps=
 
 dsa = run_dwave_sa_stats(CANDIDATE_BUSES_20, SCENARIOS, n_seeds=args.seeds)
 dsa_econ = economic_analysis(dsa["best_allocation"], dsa["eue_min"], baseline_eue)
-print(f"  Seeds:          {dsa['n_seeds']}")
-print(f"  EUE (mean±std): {dsa['eue_mean']:.4f} +/- {dsa['eue_std']:.4f} MW-prob")
-print(f"  EUE (best/worst): {dsa['eue_min']:.4f} / {dsa['eue_max']:.4f}")
-print(f"  Gap (mean/best): {dsa['mean_gap_pct']:.2f}% / {dsa['best_gap_pct']:.2f}%")
-print(f"  Runtime (mean):  {dsa['runtime_mean_sec']:.3f} s/trial, {dsa['runtime_total_sec']:.3f} s total")
-print(f"  Best CAPEX:      ${dsa_econ['capex_musd']}M | Payback: {dsa_econ['simple_payback_years']} yrs\n")
+print(f"  EUE (mean+/-std): {dsa['eue_mean']:.4f} +/- {dsa['eue_std']:.4f} | "
+      f"Gap (mean/best): {dsa['mean_gap_pct']:.2f}%/{dsa['best_gap_pct']:.2f}%\n")
 
-# ─── 8. D-WAVE LEAP HYBRID (QPU) ─────────────────────────────────────────────
+# ─── 8. D-WAVE LEAP HYBRID (QPU-assisted, decomposed) ────────────────────────
 leap = None
 if args.leap:
     print("-" * 70)
-    print("SOLVER C: D-Wave LeapHybridSampler (real QPU via Leap Cloud)")
+    print("SOLVER C: D-Wave LeapHybridSampler (hybrid: classical decomposition + QPU)")
     print("-" * 70)
     try:
         from dwave.system import LeapHybridSampler
@@ -350,7 +293,7 @@ if args.leap:
         bqm = dimod.BinaryQuadraticModel.from_qubo(Q)
         sampler = LeapHybridSampler()
         t0  = time.time()
-        resp = sampler.sample(bqm, time_limit=10, label="GIC2026_Phase3_118bus_v2")
+        resp = sampler.sample(bqm, time_limit=10, label="GIC2026_Phase3_118bus_v3")
         rt   = time.time()-t0
         best_alloc = decode(resp.first.sample, CANDIDATE_BUSES_20)
         best_eue   = compute_eue(best_alloc, SCENARIOS)
@@ -361,19 +304,116 @@ if args.leap:
                 "eue_reduction_pct":(baseline_eue-best_eue)/baseline_eue*100,
                 "optimality_gap_pct":gap, "runtime_sec":rt, "time_limit_sec":10,
                 "economics": leap_econ}
-        print(f"  Runtime:        {rt:.3f} s (time_limit=10s)")
-        print(f"  EUE:            {best_eue:.4f} MW-prob | Gap: {gap:.2f}%")
-        print(f"  CAPEX:          ${leap_econ['capex_musd']}M | Payback: {leap_econ['simple_payback_years']} yrs\n")
+        print(f"  Runtime: {rt:.3f}s | EUE: {best_eue:.4f} | Gap: {gap:.2f}%\n")
     except Exception as e:
         print(f"  Error: {e}\n")
 
-# ─── 9. IBM QUANTUM — QAOA WITH COBYLA OPTIMIZATION LOOP (UPGRADED) ──────────
+# ─── 8b. D-WAVE RAW QPU — DIRECT ANNEALING (NEW) ─────────────────────────────
+# This is architecturally different from LeapHybridSampler above: the FULL 40-variable
+# QUBO is minor-embedded onto physical qubits and annealed directly on the QPU, with
+# no classical decomposition step. This exercises D-Wave's "Direct QPU Usage" allocation.
+qpu_result = None
+if args.qpu:
+    print("-" * 70)
+    print(f"SOLVER E: Raw D-Wave QPU (DWaveSampler + EmbeddingComposite), {args.qpu_reads} reads")
+    print("-" * 70)
+    try:
+        import os
+        from dwave.system import DWaveSampler, EmbeddingComposite
+
+        token = os.environ.get("DWAVE_API_TOKEN")
+        if not token:
+            raise RuntimeError("DWAVE_API_TOKEN environment variable not set")
+
+        Q = build_qubo(CANDIDATE_BUSES_20, SCENARIOS)
+        bqm = dimod.BinaryQuadraticModel.from_qubo(Q)
+
+        # Select QPU solver: default auto-picks an Advantage2 system if available
+        qpu_kwargs = {"token": token}
+        if args.qpu_solver:
+            qpu_kwargs["solver"] = args.qpu_solver
+        else:
+            qpu_kwargs["solver"] = {"topology__type": "zephyr"}  # Advantage2 uses Zephyr topology
+
+        raw_sampler = DWaveSampler(**qpu_kwargs)
+        print(f"  QPU solver selected: {raw_sampler.solver.id}")
+        print(f"  Topology: {raw_sampler.properties.get('topology', {}).get('type', 'unknown')}")
+        print(f"  Physical qubits available: {raw_sampler.properties.get('num_qubits', 'unknown')}")
+
+        embedded_sampler = EmbeddingComposite(raw_sampler)
+
+        t0 = time.time()
+        response = embedded_sampler.sample(
+            bqm, num_reads=args.qpu_reads,
+            label="GIC2026_Phase3_118bus_rawQPU",
+            return_embedding=True,
+        )
+        rt = time.time() - t0
+
+        # Embedding diagnostics — unique to raw QPU, not available via hybrid solver
+        embedding_info = response.info.get('embedding_context', {}).get('embedding', {})
+        chain_lengths = [len(chain) for chain in embedding_info.values()] if embedding_info else []
+        physical_qubits_used = sum(chain_lengths) if chain_lengths else None
+
+        timing_info = response.info.get('timing', {})
+        chain_break_fractions = []
+        if 'chain_break_fraction' in response.record.dtype.names:
+            chain_break_fractions = response.record['chain_break_fraction'].tolist()
+
+        best_alloc, best_eue = {}, float('inf')
+        for sample, energy, occ, *_ in response.data(
+                ['sample','energy','num_occurrences'], sorted_by='energy'):
+            alloc = decode(sample, CANDIDATE_BUSES_20)
+            cap = sum(alloc.values())
+            if cap <= BUDGET_MW:
+                eue = compute_eue(alloc, SCENARIOS)
+                if eue < best_eue:
+                    best_eue, best_alloc = eue, alloc
+                    break  # response is sorted by energy; first feasible is our best
+
+        if best_eue == float('inf'):
+            best_eue, best_alloc = baseline_eue, {}
+
+        gap = max(0, (best_eue - milp["eue"]) / milp["eue"] * 100)
+        qpu_econ = economic_analysis(best_alloc, best_eue, baseline_eue)
+
+        qpu_result = {
+            "solver_id": raw_sampler.solver.id,
+            "topology": raw_sampler.properties.get('topology', {}).get('type', 'unknown'),
+            "logical_qubits": len(CANDIDATE_BUSES_20) * N_BITS,
+            "physical_qubits_used": physical_qubits_used,
+            "num_chains": len(chain_lengths) if chain_lengths else None,
+            "max_chain_length": max(chain_lengths) if chain_lengths else None,
+            "mean_chain_break_fraction": float(np.mean(chain_break_fractions)) if chain_break_fractions else None,
+            "num_reads": args.qpu_reads,
+            "qpu_access_time_us": timing_info.get('qpu_access_time'),
+            "qpu_anneal_time_per_sample_us": timing_info.get('qpu_anneal_time_per_sample'),
+            "runtime_sec": rt,
+            "allocation": best_alloc, "total_mw": sum(best_alloc.values()),
+            "eue": best_eue, "eue_reduction_pct": (baseline_eue-best_eue)/baseline_eue*100,
+            "optimality_gap_pct": gap, "economics": qpu_econ,
+        }
+        print(f"  Logical qubits (QUBO vars): {qpu_result['logical_qubits']}")
+        print(f"  Physical qubits used:       {qpu_result['physical_qubits_used']}")
+        print(f"  Number of chains:           {qpu_result['num_chains']}")
+        print(f"  Max chain length:           {qpu_result['max_chain_length']}")
+        print(f"  Mean chain-break fraction:  {qpu_result['mean_chain_break_fraction']}")
+        print(f"  QPU access time (us):       {qpu_result['qpu_access_time_us']}")
+        print(f"  Wall-clock runtime:         {rt:.3f}s")
+        print(f"  EUE: {best_eue:.4f} | Reduction: {qpu_result['eue_reduction_pct']:.2f}% | "
+              f"Gap: {gap:.2f}%\n")
+    except Exception as e:
+        print(f"  Error: {e}")
+        print("  -> Set DWAVE_API_TOKEN and retry with --qpu")
+        print("  -> If embedding fails, the 40-variable dense QUBO may not fit current")
+        print("     chip yield; try --qpu-solver to target a specific solver, or reduce")
+        print("     candidate bus count for a raw-QPU-only sub-experiment.\n")
+
+# ─── 9. IBM QUANTUM — QAOA WITH COBYLA LOOP ──────────────────────────────────
 ibm_result = None
 if args.ibm:
     print("-" * 70)
     print(f"SOLVER D: QAOA + COBYLA on IBM Quantum (max {args.ibm_iters} iterations)")
-    print(f"WARNING: each iteration submits a real QPU job (~10-20s). This will consume")
-    print(f"         significant Open Plan minutes. Reduce --ibm-iters if needed.")
     print("-" * 70)
     try:
         import os
@@ -387,11 +427,10 @@ if args.ibm:
         if not token:
             raise RuntimeError("IBM_QUANTUM_TOKEN environment variable not set")
 
-        IBM_BUSES = CANDIDATE_BUSES_20[:10]   # 10 buses -> 20 qubits (hardware-feasible)
+        IBM_BUSES = CANDIDATE_BUSES_20[:10]
         n_ibm = len(IBM_BUSES) * N_BITS
         Q_ibm = build_qubo(IBM_BUSES, SCENARIOS)
 
-        # QUBO -> Ising conversion: x_i = (1 - z_i)/2
         linear, quad = {i:0.0 for i in range(n_ibm)}, {}
         for (i,j), coeff in Q_ibm.items():
             if i==j: linear[i]+=coeff
@@ -444,18 +483,16 @@ if args.ibm:
             counts = result[0].data.meas.get_counts()
             exp_val = qubo_expectation_from_counts(counts, IBM_BUSES)
             eval_log.append({"iter": job_count[0], "job_id": job.job_id(), "exp_eue": exp_val})
-            print(f"    iter {job_count[0]:2d}: job={job.job_id()[:12]}...  exp_EUE={exp_val:.4f}")
+            print(f"    iter {job_count[0]:2d}: exp_EUE={exp_val:.4f}")
             return exp_val
 
         np.random.seed(42)
         init_params = np.random.uniform(0, np.pi, qaoa_ansatz.num_parameters)
-
         t0 = time.time()
         opt_result = minimize(cobyla_objective, init_params, method='COBYLA',
                               options={'maxiter': args.ibm_iters, 'rhobeg': 0.5})
         rt = time.time() - t0
 
-        # Final sample at optimized parameters to extract best bitstring
         final_job = sampler.run([(isa_circuit, opt_result.x)], shots=2048)
         final_counts = final_job.result()[0].data.meas.get_counts()
         best_eue_ibm, best_alloc_ibm = float('inf'), {}
@@ -473,31 +510,24 @@ if args.ibm:
 
         gap_ibm = max(0, (best_eue_ibm - m_ibm["eue"]) / max(m_ibm["eue"],1e-9) * 100)
         ibm_econ = economic_analysis(best_alloc_ibm, best_eue_ibm, baseline_eue)
-
         ibm_result = {
             "backend": backend.name, "n_qubits": n_ibm, "p_layers": p_layers,
             "cobyla_iterations": job_count[0], "total_jobs": job_count[0] + 1,
-            "final_job_id": final_job.job_id(),
-            "allocation": best_alloc_ibm, "total_mw": sum(best_alloc_ibm.values()),
-            "eue": best_eue_ibm, "eue_reduction_pct": (baseline_eue-best_eue_ibm)/baseline_eue*100,
+            "final_job_id": final_job.job_id(), "allocation": best_alloc_ibm,
+            "total_mw": sum(best_alloc_ibm.values()), "eue": best_eue_ibm,
+            "eue_reduction_pct": (baseline_eue-best_eue_ibm)/baseline_eue*100,
             "optimality_gap_pct": gap_ibm, "runtime_sec": rt,
             "convergence_log": eval_log, "economics": ibm_econ,
         }
-        print(f"\n  COBYLA converged after {job_count[0]} iterations ({job_count[0]+1} total QPU jobs)")
-        print(f"  Total runtime:   {rt:.2f} s")
-        print(f"  Final EUE:       {best_eue_ibm:.4f} MW-prob")
-        print(f"  EUE Reduction:   {ibm_result['eue_reduction_pct']:.2f}%")
-        print(f"  Gap vs MILP:     {gap_ibm:.2f}%")
-        print(f"  CAPEX:           ${ibm_econ['capex_musd']}M | Payback: {ibm_econ['simple_payback_years']} yrs\n")
+        print(f"\n  Final EUE: {best_eue_ibm:.4f} | Gap: {gap_ibm:.2f}%\n")
     except Exception as e:
-        print(f"  Error: {e}")
-        print("  -> Set IBM_QUANTUM_TOKEN and retry with --ibm\n")
+        print(f"  Error: {e}\n")
 
 # ─── 10. SCALING STUDY ───────────────────────────────────────────────────────
 scaling = []
 if args.scaling:
     print("-" * 70)
-    print("SCALING STUDY: problem size vs solution quality and runtime")
+    print("SCALING STUDY")
     print("-" * 70)
     EXTRA_BUSES = [33, 46, 60, 74, 99]
     ALL_BUSES   = CANDIDATE_BUSES_20 + EXTRA_BUSES
@@ -505,64 +535,57 @@ if args.scaling:
         buses = ALL_BUSES[:n]
         m = solve_milp(buses, SCENARIOS, tlim=30)
         stats = run_dwave_sa_stats(buses, SCENARIOS, n_seeds=5, num_reads=500, num_sweeps=1000)
-        scaling.append({"n":n, "qubits":n*N_BITS,
-                        "milp_eue":m["eue"], "milp_rt":m["runtime_sec"],
-                        "sa_eue_mean":stats["eue_mean"], "sa_eue_std":stats["eue_std"],
-                        "sa_gap_mean":stats["mean_gap_pct"], "sa_gap_best":stats["best_gap_pct"]})
-        print(f"  n={n:2d} | {n*N_BITS:2d} qubits | MILP {m['eue']:.4f} | "
-              f"SA {stats['eue_mean']:.4f}+/-{stats['eue_std']:.4f} | "
+        scaling.append({"n":n, "qubits":n*N_BITS, "milp_eue":m["eue"],
+                        "sa_eue_mean":stats["eue_mean"], "sa_gap_mean":stats["mean_gap_pct"],
+                        "sa_gap_best":stats["best_gap_pct"]})
+        print(f"  n={n:2d} | MILP {m['eue']:.4f} | SA {stats['eue_mean']:.4f} | "
               f"Gap(mean/best) {stats['mean_gap_pct']:.1f}%/{stats['best_gap_pct']:.1f}%")
     print()
 
 # ─── 11. FINAL RESULTS TABLE ─────────────────────────────────────────────────
 print("=" * 70)
-print("FINAL BENCHMARK RESULTS — IEEE 118-bus | 40 QUBO vars | 15 scenarios")
+print("FINAL BENCHMARK RESULTS")
 print("=" * 70)
-print(f"{'Method':<32} {'EUE':>10} {'Red%':>7} {'Gap%':>7} {'Payback':>9}")
+print(f"{'Method':<34} {'EUE':>10} {'Red%':>7} {'Gap%':>7}")
 print("-" * 70)
-print(f"{'No BESS (baseline)':<32} {baseline_eue:>10.4f} {'—':>7} {'—':>7} {'—':>9}")
-print(f"{'MILP/HiGHS (optimal)':<32} {milp['eue']:>10.4f} {milp['eue_reduction_pct']:>6.2f}% "
-      f"{'0.00%':>7} {str(milp_econ['simple_payback_years'])+'y':>9}")
-print(f"{'D-Wave SA (mean of '+str(args.seeds)+')':<32} {dsa['eue_mean']:>10.4f} "
-      f"{dsa['eue_reduction_pct_mean']:>6.2f}% {dsa['mean_gap_pct']:>6.2f}% "
-      f"{str(dsa_econ['simple_payback_years'])+'y':>9}")
-print(f"{'D-Wave SA (best of '+str(args.seeds)+')':<32} {dsa['eue_min']:>10.4f} "
-      f"{dsa['eue_reduction_pct_best']:>6.2f}% {dsa['best_gap_pct']:>6.2f}% {'—':>9}")
+print(f"{'No BESS (baseline)':<34} {baseline_eue:>10.4f} {'—':>7} {'—':>7}")
+print(f"{'MILP/HiGHS (optimal)':<34} {milp['eue']:>10.4f} {milp['eue_reduction_pct']:>6.2f}% {'0.00%':>7}")
+print(f"{'D-Wave SA (mean of '+str(args.seeds)+')':<34} {dsa['eue_mean']:>10.4f} "
+      f"{dsa['eue_reduction_pct_mean']:>6.2f}% {dsa['mean_gap_pct']:>6.2f}%")
+print(f"{'D-Wave SA (best of '+str(args.seeds)+')':<34} {dsa['eue_min']:>10.4f} "
+      f"{dsa['eue_reduction_pct_best']:>6.2f}% {dsa['best_gap_pct']:>6.2f}%")
 if leap:
-    print(f"{'D-Wave LeapHybrid (QPU)':<32} {leap['eue']:>10.4f} {leap['eue_reduction_pct']:>6.2f}% "
-          f"{leap['optimality_gap_pct']:>6.2f}% {str(leap['economics']['simple_payback_years'])+'y':>9}")
+    print(f"{'D-Wave LeapHybrid (hybrid QPU)':<34} {leap['eue']:>10.4f} {leap['eue_reduction_pct']:>6.2f}% "
+          f"{leap['optimality_gap_pct']:>6.2f}%")
 else:
-    print(f"{'D-Wave LeapHybrid (QPU)':<32} {'-> run with --leap':>34}")
+    print(f"{'D-Wave LeapHybrid (hybrid QPU)':<34} {'-> run with --leap':>25}")
+if qpu_result:
+    print(f"{'D-Wave Raw QPU (direct anneal)':<34} {qpu_result['eue']:>10.4f} "
+          f"{qpu_result['eue_reduction_pct']:>6.2f}% {qpu_result['optimality_gap_pct']:>6.2f}%")
+else:
+    print(f"{'D-Wave Raw QPU (direct anneal)':<34} {'-> run with --qpu':>25}")
 if ibm_result:
-    print(f"{'IBM QAOA+COBYLA ('+ibm_result['backend']+')':<32} {ibm_result['eue']:>10.4f} "
-          f"{ibm_result['eue_reduction_pct']:>6.2f}% {ibm_result['optimality_gap_pct']:>6.2f}% "
-          f"{str(ibm_result['economics']['simple_payback_years'])+'y':>9}")
+    print(f"{'IBM QAOA+COBYLA':<34} {ibm_result['eue']:>10.4f} {ibm_result['eue_reduction_pct']:>6.2f}% "
+          f"{ibm_result['optimality_gap_pct']:>6.2f}%")
 else:
-    print(f"{'IBM QAOA+COBYLA':<32} {'-> run with --ibm':>34}")
+    print(f"{'IBM QAOA+COBYLA':<34} {'-> run with --ibm':>25}")
 print("-" * 70)
 
 # ─── 12. SAVE JSON ───────────────────────────────────────────────────────────
 out = {
-    "experiment": "GIC2026_Phase3_DOE_EnergyInfrastructure_v2_enterprise",
+    "experiment": "GIC2026_Phase3_DOE_EnergyInfrastructure_v3",
     "team": "Qudit Creons", "member": "Abhishek Raj",
-    "test_system": "IEEE 118-bus (MATPOWER case118)",
-    "ai_loads_mw": {"bus_49": 300, "bus_80": 300},
-    "n_candidates": len(CANDIDATE_BUSES_20), "candidate_buses": CANDIDATE_BUSES_20,
-    "n_qubits": len(CANDIDATE_BUSES_20)*N_BITS, "n_scenarios": len(SCENARIOS),
-    "capital_budget_mw": BUDGET_MW, "baseline_eue": round(baseline_eue, 6),
-    "economic_assumptions": {"capex_per_mw_musd": CAPEX_PER_MW_M, "voll_per_mwh_usd": VOLL_PER_MWH,
-                              "source": "NREL 2024 ATB (capex); DOE/LBNL ICE Calculator (VOLL)"},
-    "penalty_derivation": {"lambda_min_provable": LAMBDA_MIN, "lambda_applied": LAMBDA_B,
-                            "safety_factor": 1.5, "max_benefit_bound": MAX_BENEFIT},
+    "baseline_eue": round(baseline_eue, 6),
+    "penalty_derivation": {"lambda_min": LAMBDA_MIN, "lambda_applied": LAMBDA_B},
     "milp": {k: round(v,6) if isinstance(v,float) else v for k,v in milp.items()},
     "milp_economics": milp_econ,
-    "dwave_sa_stats": dsa,
-    "dwave_sa_economics": dsa_econ,
+    "dwave_sa_stats": dsa, "dwave_sa_economics": dsa_econ,
     "leap_hybrid": leap,
+    "raw_qpu": qpu_result,
     "ibm_qaoa": ibm_result,
     "scaling_study": scaling,
 }
-with open("results_phase3_v2.json", "w") as f:
+with open("results_phase3_v3.json", "w") as f:
     json.dump(out, f, indent=2, default=str)
-print("\nResults saved -> results_phase3_v2.json")
+print("\nResults saved -> results_phase3_v3.json")
 print("=" * 70)
