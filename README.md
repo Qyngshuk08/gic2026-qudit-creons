@@ -251,7 +251,7 @@ See `requirements.txt` for pinned versions.
 - Economic assumptions: NREL 2024 Annual Technology Baseline (BESS capex); DOE/LBNL
   Interruption Cost Estimate Calculator (Value of Lost Load)
 - AI load profiles: synthetic, generated within script
-- Generative AI tools used for code support and writing assistance (disclosed per GIC rules)
+- Generative AI tools used for documentation and writing assistance (disclosed per GIC rules)
 - All technical formulations, QUBO construction, chain-strength diagnosis, and
   experimental design are the team's own work
 
