@@ -28,7 +28,9 @@ gic2026-qudit-creons/
 ├── experiment.py           # Main Phase 3 experiment (all solvers, QPU, scaling study)
 ├── results_phase3_v4.json  # Output results (auto-generated)
 ├── README.md               # This file
-└── requirements.txt        # Python dependencies
+├── requirements.txt        # Python dependencies
+├── visualizations/         # Standalone chart-generation scripts (see below)
+└── images/                 # Generated chart outputs (300 DPI, print-ready)
 ```
 
 ---
@@ -162,6 +164,38 @@ parameter improvements. See "Known Limitations" below.
 **Scaling study:** across 10 → 25 candidate buses (20 → 50 qubits), classical SA's mean
 gap is non-monotonic (92.4% → 21.5% → 34.2% → 59.6%), identifying the 40-qubit region as
 where the QUBO landscape is best-conditioned for this problem's penalty structure.
+
+---
+
+## Visualizations
+
+Seven standalone, enterprise-styled chart scripts (`visualisation/scripts/`) generate
+the figures used in the Phase 3 write-up, each producing a 300 DPI print-ready PNG
+(`visualisation/images/`) from the real experimental results above. Each script is
+fully self-contained and runnable independently:
+
+```bash
+cd visualisation/scripts
+python benchmark_comparison.py   # -> ../images/benchmark_comparison.png
+```
+
+| Script | Image | Shows |
+|---|---|---|
+| [`visualisation/scripts/benchmark_comparison.py`](visualisation/scripts/benchmark_comparison.py) | [`visualisation/images/benchmark_comparison.png`](visualisation/images/benchmark_comparison.png) | All 6 methods — EUE reduction and optimality gap side-by-side |
+| [`visualisation/scripts/scaling_study.py`](visualisation/scripts/scaling_study.py) | [`visualisation/images/scaling_study.png`](visualisation/images/scaling_study.png) | Qubits vs. gap; non-monotonic scaling finding |
+| [`visualisation/scripts/qaoa_convergence.py`](visualisation/scripts/qaoa_convergence.py) | [`visualisation/images/qaoa_convergence.png`](visualisation/images/qaoa_convergence.png) | Real 25-iteration IBM COBYLA trace with extraction-sensitivity diagnosis |
+| [`visualisation/scripts/chain_strength_fix.py`](visualisation/scripts/chain_strength_fix.py) | [`visualisation/images/chain_strength_fix.png`](visualisation/images/chain_strength_fix.png) | Before/after: chain-break fraction 0.20→0.0, feasibility 0%→42.5% |
+| [`visualisation/scripts/economic_analysis.py`](visualisation/scripts/economic_analysis.py) | [`visualisation/images/economic_analysis.png`](visualisation/images/economic_analysis.png) | CAPEX vs. annual outage-cost savings, with methodology caveat |
+| [`visualisation/scripts/penalty_sensitivity.py`](visualisation/scripts/penalty_sensitivity.py) | [`visualisation/images/penalty_sensitivity.png`](visualisation/images/penalty_sensitivity.png) | λ_budget sweep vs. EUE, with analytical derivation annotated |
+| [`visualisation/scripts/architecture_diagram.py`](visualisation/scripts/architecture_diagram.py) | [`visualisation/images/architecture_diagram.png`](visualisation/images/architecture_diagram.png) | Three-path hybrid quantum-classical architecture flowchart |
+
+All figures are generated directly from the values in `results_phase3_v4.json` —
+no fabricated or illustrative data. Regenerate all seven with:
+
+```bash
+cd visualisation/scripts
+for f in *.py; do python "$f"; done
+```
 
 ---
 
